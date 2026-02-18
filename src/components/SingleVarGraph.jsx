@@ -46,11 +46,16 @@ const DRAW_VERTICAL_MARGIN = 40;
 const drawYMin = LINE_Y - DRAW_VERTICAL_MARGIN;
 const drawYMax = LINE_Y + DRAW_VERTICAL_MARGIN;
 
+/** Tolerance (px) to consider a segment endpoint "at" the graph end for drawing an arrow */
+const END_ARROW_TOLERANCE = 2;
+
 /** Empty circle (open point) detection: max horizontal span to count as "around one tick" */
 const EMPTY_CIRCLE_MAX_SPAN = fullUnit * 0.9;
 /** Min vertical extent (px) so we require some up/down motion */
 const EMPTY_CIRCLE_MIN_VERTICAL = 12;
 const EMPTY_CIRCLE_RADIUS = 8;
+/** If path length (ink) is at least this many times the bounding-box perimeter, treat circle as filled */
+const FILLED_CIRCLE_INK_RATIO = 1.3;
 
 /** Split a horizontal segment into sub-segments that do not cross open circle interiors */
 const splitSegmentAtOpenCircles = (seg, emptyCircleTicks) => {
@@ -196,7 +201,12 @@ const SingleVarGraph = ({ onStateChange }) => {
 			const maxY = Math.max(...ys);
 			const spanX = maxX - minX;
 			const spanY = maxY - minY;
-			// Detect "empty circle" gesture: small horizontal span, some vertical motion, multiple points
+			const pathLength = prev.length < 2 ? 0 : prev.slice(0, -1).reduce((sum, p, i) => {
+				const q = prev[i + 1];
+				return sum + Math.hypot(q.x - p.x, q.y - p.y);
+			}, 0);
+			const perimeter = 2 * (spanX + spanY) || 1;
+			const inkRatio = pathLength / perimeter;
 			if (
 				prev.length >= 4 &&
 				spanX < EMPTY_CIRCLE_MAX_SPAN &&
@@ -206,10 +216,13 @@ const SingleVarGraph = ({ onStateChange }) => {
 				const centerVal = xToValue(centerX);
 				const tick = Math.round(centerVal);
 				const clampedTick = Math.max(MIN, Math.min(MAX, tick));
-				pushHistory({ type: ACTION_EMPTY_CIRCLE, tick: clampedTick });
+				if (inkRatio >= FILLED_CIRCLE_INK_RATIO) {
+					pushHistory({ type: ACTION_FILLED_CIRCLE, tick: clampedTick });
+				} else {
+					pushHistory({ type: ACTION_EMPTY_CIRCLE, tick: clampedTick });
+				}
 				return [];
 			}
-			// Detect "filled circle" gesture: small horizontal span, little vertical motion (drawing on the line)
 			if (
 				prev.length >= 2 &&
 				spanX < EMPTY_CIRCLE_MAX_SPAN &&
@@ -224,7 +237,6 @@ const SingleVarGraph = ({ onStateChange }) => {
 			}
 			const minVal = xToValue(minX);
 			const maxVal = xToValue(maxX);
-			// Snap to nearest tick: past halfway -> fill to that tick, else remove excess
 			const leftTick = Math.round(minVal);
 			const rightTick = Math.round(maxVal);
 			const clampedLeft = Math.max(EXTENDED_MIN, Math.min(EXTENDED_MAX, leftTick));
@@ -258,7 +270,6 @@ const SingleVarGraph = ({ onStateChange }) => {
 		endDrawing();
 	}, [endDrawing]);
 
-	// Touch handlers (for preventDefault on move to avoid scrolling)
 	const handleTouchStart = useCallback(
 		(e) => {
 			if (e.touches.length === 1) {
@@ -281,7 +292,6 @@ const SingleVarGraph = ({ onStateChange }) => {
 		endDrawing();
 	}, [endDrawing]);
 
-	// Non-passive touch listener so we can preventDefault and avoid page scroll while drawing
 	useEffect(() => {
 		const el = containerRef.current;
 		if (!el) return;
@@ -395,7 +405,6 @@ const SingleVarGraph = ({ onStateChange }) => {
 					</pattern>
 				</defs>
 				<rect width={WIDTH} height={HEIGHT} fill="url(#grid)" />
-				{/* Main horizontal line (stops at arrow bases so it doesn't overlap arrow tips) */}
 				<line
 					x1={lineDrawStart + 8}
 					y1={LINE_Y}
@@ -404,7 +413,6 @@ const SingleVarGraph = ({ onStateChange }) => {
 					stroke="#333"
 					strokeWidth={2}
 				/>
-				{/* Ticks and labels */}
 				{tickValues.map((value) => {
 					const x = valueToX(value);
 					return (
@@ -430,7 +438,6 @@ const SingleVarGraph = ({ onStateChange }) => {
 						</g>
 					);
 				})}
-				{/* Empty circles (open points) at ticks */}
 				{emptyCircleTicks.map((tick) => (
 					<circle
 						key={`empty-${tick}`}
@@ -442,7 +449,6 @@ const SingleVarGraph = ({ onStateChange }) => {
 						strokeWidth={2}
 					/>
 				))}
-				{/* Filled circles (closed points) at ticks */}
 				{filledCircleTicks.map((tick) => (
 					<circle
 						key={`filled-${tick}`}
@@ -454,7 +460,6 @@ const SingleVarGraph = ({ onStateChange }) => {
 						strokeWidth={2}
 					/>
 				))}
-				{/* Completed line segments (split at open circles so line doesn't show inside them) */}
 				{segments
 					.flatMap((seg) => splitSegmentAtOpenCircles(seg, emptyCircleTicks))
 					.map((seg, idx) => (
@@ -468,7 +473,40 @@ const SingleVarGraph = ({ onStateChange }) => {
 							strokeLinejoin="round"
 						/>
 					))}
-				{/* Current stroke in progress */}
+				{/* Gray number-line arrows (drawn first so blue segment arrows can cover them) */}
+				<polygon
+					points={`${lineDrawStart + 8},${LINE_Y - 6} ${lineDrawStart},${LINE_Y} ${lineDrawStart + 8},${LINE_Y + 6}`}
+					fill="#333"
+				/>
+				<polygon
+					points={`${lineDrawEnd - 8},${LINE_Y - 6} ${lineDrawEnd},${LINE_Y} ${lineDrawEnd - 8},${LINE_Y + 6}`}
+					fill="#333"
+				/>
+				{/* Blue arrows overlay when a drawn segment reaches the graph edge */}
+				{segments.flatMap((seg, segIdx) => {
+					const atLeftEnd = seg[0].x <= lineStart + END_ARROW_TOLERANCE;
+					const atRightEnd = seg[1].x >= lineEnd - END_ARROW_TOLERANCE;
+					const arrows = [];
+					if (atLeftEnd) {
+						arrows.push(
+							<polygon
+								key={`${segIdx}-left`}
+								points={`${lineDrawStart + 8},${LINE_Y - 6} ${lineDrawStart},${LINE_Y} ${lineDrawStart + 8},${LINE_Y + 6}`}
+								fill="#1967d2"
+							/>
+						);
+					}
+					if (atRightEnd) {
+						arrows.push(
+							<polygon
+								key={`${segIdx}-right`}
+								points={`${lineDrawEnd - 8},${LINE_Y - 6} ${lineDrawEnd},${LINE_Y} ${lineDrawEnd - 8},${LINE_Y + 6}`}
+								fill="#1967d2"
+							/>
+						);
+					}
+					return arrows;
+				})}
 				{path.length >= 2 && (
 					<path
 						d={pathD}
@@ -479,15 +517,6 @@ const SingleVarGraph = ({ onStateChange }) => {
 						strokeLinejoin="round"
 					/>
 				)}
-				{/* Arrows on top of drawn line */}
-				<polygon
-					points={`${lineDrawStart + 8},${LINE_Y - 6} ${lineDrawStart},${LINE_Y} ${lineDrawStart + 8},${LINE_Y + 6}`}
-					fill="#333"
-				/>
-				<polygon
-					points={`${lineDrawEnd - 8},${LINE_Y - 6} ${lineDrawEnd},${LINE_Y} ${lineDrawEnd - 8},${LINE_Y + 6}`}
-					fill="#333"
-				/>
 			</svg>
 		</div>
 	);
